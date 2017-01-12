@@ -59,7 +59,6 @@ const struct usbi_os_backend * const usbi_backend = &usbdk_backend;
 #else
 const struct usbi_os_backend * const usbi_backend = &windows_backend;
 #endif
-
 #elif defined(OS_WINCE)
 const struct usbi_os_backend * const usbi_backend = &wince_backend;
 #elif defined(OS_HAIKU)
@@ -1283,7 +1282,50 @@ int API_EXPORTED libusb_open(libusb_device *dev,
 }
 
 /** \ingroup libusb_dev
- * Convenience function for finding a device with a particular
+ * Construct a libusb device from fd.
+ * UseCase: Android, after permission granted from Android Device
+ *  Manager, using Java device fd can be extracted and pass on to NDK.
+ */
+int API_EXPORTED libusb_open2(libusb_device *dev, libusb_device_handle **handle, int fd)
+{
+	struct libusb_context *ctx = DEVICE_CTX(dev);
+	struct libusb_device_handle *_handle;
+	size_t priv_size = usbi_backend->device_handle_priv_size;
+	int r;
+	usbi_dbg("open %d.%d", dev->bus_number, dev->device_address);
+
+	_handle = malloc(sizeof(*_handle) + priv_size);
+	if (!_handle)
+		return LIBUSB_ERROR_NO_MEM;
+
+	r = usbi_mutex_init(&_handle->lock);
+	if (r) {
+		free(_handle);
+		return LIBUSB_ERROR_OTHER;
+	}
+
+	_handle->dev = libusb_ref_device(dev);
+	_handle->claimed_interfaces = 0;
+	memset(&_handle->os_priv, 0, priv_size);
+
+	r = usbi_backend->open2(_handle, fd);
+	if (r < 0) {
+		usbi_dbg("open %d.%d returns %d", dev->bus_number, dev->device_address, r);
+		libusb_unref_device(dev);
+		usbi_mutex_destroy(&_handle->lock);
+		free(_handle);
+		return r;
+	}
+
+	usbi_mutex_lock(&ctx->open_devs_lock);
+	list_add(&_handle->list, &ctx->open_devs);
+	usbi_mutex_unlock(&ctx->open_devs_lock);
+	*handle = _handle;
+
+	return 0;
+}
+
+ /* Convenience function for finding a device with a particular
  * <tt>idVendor</tt>/<tt>idProduct</tt> combination. This function is intended
  * for those scenarios where you are using libusb to knock up a quick test
  * application - it allows you to avoid calling libusb_get_device_list() and
@@ -1466,7 +1508,23 @@ libusb_device * LIBUSB_CALL libusb_get_device(libusb_device_handle *dev_handle)
 }
 
 /** \ingroup libusb_dev
- * Determine the bConfigurationValue of the currently active configuration.
+ * Get the underlying device for a \a dev_node.
+ * UseCase: Android
+ * \param \a dev_node device path
+ * \returns allocate a device from \a dev_node
+ */
+DEFAULT_VISIBILITY
+libusb_device * LIBUSB_CALL libusb_get_device2(libusb_context *ctx, const char *dev_node)
+{
+	if(usbi_backend->device2 == NULL) {
+		/* Not supported on this platform */
+		return NULL;
+	}
+
+	return usbi_backend->device2(ctx, dev_node);
+}
+
+ /* Determine the bConfigurationValue of the currently active configuration.
  *
  * You could formulate your own control request to obtain this information,
  * but this function has the advantage that it may be able to retrieve the

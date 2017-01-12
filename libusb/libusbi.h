@@ -165,7 +165,6 @@ static inline void *usbi_reallocf(void *ptr, size_t size)
 #else
 #define TIMEVAL_TV_SEC_TYPE	time_t
 #endif
-
 /* Some platforms don't have this define */
 #ifndef TIMESPEC_TO_TIMEVAL
 #define TIMESPEC_TO_TIMEVAL(tv, ts)					\
@@ -307,7 +306,6 @@ struct libusb_context {
 	/* A bitmask of flags that are set to indicate specific events that need to
 	 * be handled. Protected by event_data_lock. */
 	unsigned int event_flags;
-
 	/* A counter that is set when we want to interrupt and prevent event handling,
 	 * in order to safely close a device. Protected by event_data_lock. */
 	unsigned int device_close;
@@ -711,6 +709,9 @@ struct usbi_os_backend {
 	 * do this for you.
 	 */
 	int (*open)(struct libusb_device_handle *dev_handle);
+	
+	int (*open2)(struct libusb_device_handle *handle, int fd);
+	struct libusb_device* (*device2)(struct libusb_context *ctx, const char *dev_node);
 
 	/* Close a device such that the handle cannot be used again. Your backend
 	 * should destroy any resources that were allocated in the open path.
@@ -948,7 +949,6 @@ struct usbi_os_backend {
 	/* Free memory allocated by dev_mem_alloc. */
 	int (*dev_mem_free)(struct libusb_device_handle *handle,
 		unsigned char *buffer, size_t len);
-
 	/* Determine if a kernel driver is active on an interface. Optional.
 	 *
 	 * The presence of a kernel driver on an interface indicates that any
