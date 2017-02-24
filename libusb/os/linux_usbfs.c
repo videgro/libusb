@@ -5,6 +5,7 @@
  * Copyright © 2001 Johannes Erdfelt <johannes@erdfelt.com>
  * Copyright © 2013 Nathan Hjelm <hjelmn@mac.com>
  * Copyright © 2012-2013 Hans de Goede <hdegoede@redhat.com>
+ * Copyright © 2013-2016 Martin Marinov <martintzvetomirov@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -133,6 +134,7 @@ usbi_mutex_static_t linux_hotplug_lock = USBI_MUTEX_INITIALIZER;
 static int linux_start_event_monitor(void);
 static int linux_stop_event_monitor(void);
 static int linux_scan_devices(struct libusb_context *ctx);
+static int linux_scan_devices2(struct libusb_context *ctx, int fd, const char * path);
 static int sysfs_scan_device(struct libusb_context *ctx, const char *devname);
 static int detach_kernel_driver_and_claim(struct libusb_device_handle *, int);
 
@@ -217,7 +219,7 @@ static int _get_usbfs_fd(struct libusb_device *dev, mode_t mode, int silent)
 			usbi_err(ctx, "File doesn't exist, wait %d ms and try again", delay/1000);
    
 		/* Wait 10ms for USB device path creation.*/
-		nanosleep(&(struct timespec){delay / 1000000, (delay * 1000) % 1000000000UL}, NULL);
+		usleep(delay);
 
 		fd = _open(path, mode);
 		if (fd != -1)
@@ -387,6 +389,20 @@ static int kernel_version_ge(int major, int minor, int sublevel)
 	return ksublevel >= sublevel;
 }
 
+static char * find_usbfs_path_android(const char * path) {
+	static char USB_PATH_BUFFER[256];
+
+	int rem = 2;
+	char * pathcopy;
+
+	memset(USB_PATH_BUFFER, 0, sizeof USB_PATH_BUFFER);
+	for (pathcopy = ((char *) path) + strlen(path); pathcopy >= path; pathcopy--) {
+		if (*pathcopy == '/' && --rem == 0) break;
+	}
+
+	return strncpy(USB_PATH_BUFFER, path, pathcopy-path);
+}
+
 static int op_init(struct libusb_context *ctx)
 {
 	struct stat statbuf;
@@ -394,8 +410,14 @@ static int op_init(struct libusb_context *ctx)
 
 	usbfs_path = find_usbfs_path();
 	if (!usbfs_path) {
+		/* On Android Lollipop (Android 5), their is restriction due to SELinux.
+		 * due to which, all filesystem related query ends up in failure. */
+#if defined(__ANDROID__)
+		usbi_warn(ctx, "could not find usbfs. Android 5+?");
+#else
 		usbi_err(ctx, "could not find usbfs");
 		return LIBUSB_ERROR_OTHER;
+#endif
 	}
 
 	if (monotonic_clkid == -1)
@@ -470,17 +492,28 @@ static int op_init(struct libusb_context *ctx)
 	usbi_mutex_static_lock(&linux_hotplug_startstop_lock);
 	r = LIBUSB_SUCCESS;
 	if (init_count == 0) {
+#if defined(__ANDROID__)
+		if(linux_start_event_monitor() !=  LIBUSB_SUCCESS) {
+			usbi_warn(ctx, "unable to starting hotplug event monitor. Android 5+?");
+		}
+#else
 		/* start up hotplug event handler */
 		r = linux_start_event_monitor();
+#endif
 	}
 	if (r == LIBUSB_SUCCESS) {
+#if defined(__ANDROID__)
+        usbi_warn(ctx, "We don't enumerate devices on Android due to restriction issues in Android N");
+#else
 		r = linux_scan_devices(ctx);
+#endif
 		if (r == LIBUSB_SUCCESS)
 			init_count++;
 		else if (init_count == 0)
 			linux_stop_event_monitor();
-	} else
+	} else {
 		usbi_err(ctx, "error starting hotplug event monitor");
+	}
 	usbi_mutex_static_unlock(&linux_hotplug_startstop_lock);
 
 	return r;
@@ -1352,6 +1385,59 @@ static int op_open(struct libusb_device_handle *handle)
 		close(hpriv->fd);
 
 	return r;
+}
+
+static int op_open2(struct libusb_device_handle *handle, int fd) {
+	int r;
+	struct linux_device_handle_priv *hpriv = _device_handle_priv(handle);
+
+	hpriv->fd = fd;
+
+	r = ioctl(hpriv->fd, IOCTL_USBFS_GET_CAPABILITIES, &hpriv->caps);
+	if (r < 0) {
+		if (errno == ENOTTY)
+			usbi_dbg("getcap not available");
+		else
+			usbi_err(HANDLE_CTX(handle), "getcap failed (%d)", errno);
+		hpriv->caps = 0;
+		if (supports_flag_zero_packet)
+			hpriv->caps |= USBFS_CAP_ZERO_PACKET;
+		if (supports_flag_bulk_continuation)
+			hpriv->caps |= USBFS_CAP_BULK_CONTINUATION;
+	}
+
+	return usbi_add_pollfd(HANDLE_CTX(handle), hpriv->fd, POLLOUT);
+}
+
+static libusb_device* op_device2(struct libusb_context *ctx, const char *dev_node) {
+	uint8_t busnum, devaddr;
+	unsigned int session_id;
+	if (linux_get_device_address(ctx, 0, &busnum, &devaddr,
+		dev_node, NULL) != LIBUSB_SUCCESS) {
+		usbi_dbg("failed to get device address (%s)", dev_node);
+		return NULL;
+	}
+
+	/* make sure device is enumerated */
+	struct libusb_device *dev;
+
+	/* FIXME: session ID is not guaranteed unique as addresses can wrap and
+	 * will be reused. instead we should add a simple sysfs attribute with
+	 * a session ID. */
+	session_id = busnum << 8 | devaddr;
+	usbi_dbg("busnum %d devaddr %d session_id %ld", busnum, devaddr,
+			 session_id);
+
+	usbi_dbg("allocating new device for %d/%d (session %ld)",
+			 busnum, devaddr, session_id);
+	dev = usbi_alloc_device(ctx, session_id);
+	if (!dev) {
+		return NULL;
+	}
+
+	usbi_connect_device(dev);
+
+	return dev;
 }
 
 static void op_close(struct libusb_device_handle *dev_handle)
@@ -2729,6 +2815,8 @@ const struct usbi_os_backend usbi_backend = {
 	.get_config_descriptor_by_value = op_get_config_descriptor_by_value,
 
 	.open = op_open,
+	.open2 = op_open2,
+	.device2 = op_device2,
 	.close = op_close,
 	.get_configuration = op_get_configuration,
 	.set_configuration = op_set_configuration,
