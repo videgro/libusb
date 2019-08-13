@@ -920,7 +920,7 @@ static int op_get_active_config_descriptor(struct libusb_device *dev,
 
 	len = MIN(len, (size_t)r);
 	memcpy(buffer, config_desc, len);
-	return len;
+	return (int)len;
 }
 
 static int op_get_config_descriptor(struct libusb_device *dev,
@@ -950,7 +950,7 @@ static int op_get_config_descriptor(struct libusb_device *dev,
 
 	len = MIN(len, (size_t)r);
 	memcpy(buffer, descriptors, len);
-	return len;
+	return (int)len;
 }
 
 /* send a control message to retrieve active configuration */
@@ -1111,7 +1111,7 @@ static int initialize_device(struct libusb_device *dev, uint8_t busnum,
 	if (wrapped_fd < 0)
 		close(fd);
 
-	return r;
+	return (int)r;
 }
 
 static int linux_get_parent_info(struct libusb_device *dev, const char *sysfs_dir)
@@ -1558,10 +1558,10 @@ static libusb_device* op_device2(struct libusb_context *ctx, const char *dev_nod
 	 * a session ID. */
 	session_id = busnum << 8 | devaddr;
 	usbi_dbg("busnum %d devaddr %d session_id %ld", busnum, devaddr,
-			 session_id);
+			 (long)session_id);
 
 	usbi_dbg("allocating new device for %d/%d (session %ld)",
-			 busnum, devaddr, session_id);
+			 busnum, devaddr, (long)session_id);
 	dev = usbi_alloc_device(ctx, session_id);
 	if (!dev) {
 		return NULL;
@@ -1778,7 +1778,7 @@ static int do_streams_ioctl(struct libusb_device_handle *handle, long req,
 	streams->num_eps = num_endpoints;
 	memcpy(streams->eps, endpoints, num_endpoints);
 
-	r = ioctl(fd, req, streams);
+	r = ioctl(fd, (int)req, streams);
 
 	free(streams);
 
@@ -2485,7 +2485,7 @@ static int handle_bulk_completion(struct usbi_transfer *itransfer,
 {
 	struct linux_transfer_priv *tpriv = usbi_transfer_get_os_priv(itransfer);
 	struct libusb_transfer *transfer = USBI_TRANSFER_TO_LIBUSB_TRANSFER(itransfer);
-	int urb_idx = urb - tpriv->urbs;
+	int urb_idx = (int)(urb - tpriv->urbs);
 
 	usbi_mutex_lock(&itransfer->lock);
 	usbi_dbg("handling completion status %d of bulk urb %d/%d", urb->status,
