@@ -2172,7 +2172,7 @@ static int handle_events(struct libusb_context *ctx, struct timeval *tv)
 	usbi_inc_fds_ref(fds, nfds);
 	usbi_mutex_unlock(&ctx->event_data_lock);
 
-	timeout_ms = (int)(tv->tv_sec * 1000) + (tv->tv_usec / 1000);
+	timeout_ms = (int)((tv->tv_sec * 1000) + (tv->tv_usec / 1000));
 
 	/* round up to next millisecond */
 	if (tv->tv_usec % 1000)
